@@ -2,6 +2,8 @@ import sys
 import os
 import pickle
 import math
+import random
+import copy
 
 import pydicom
 import SimpleITK as sitk
@@ -9,7 +11,9 @@ import numpy as np
 import cv2
 from PIL import Image
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import torch
 from torch.utils.data import *
@@ -23,6 +27,7 @@ CLASS_MAPPING = {
     'No Lung Opacity / Not Normal': 1,
     'Lung Opacity': 2
 }
+IOU_THRESHOLD = 0.2
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
 if sys.platform == 'linux':
@@ -30,15 +35,16 @@ if sys.platform == 'linux':
     rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (2048, rlimit[1]))
 
+# helpers
 def load_dicom_image(filename):
     ds = sitk.ReadImage(filename)
 
-    image = sitk.GetArrayFromImage(ds)
-    c, w, h = image.shape
+    image = sitk.GetArrayFromImage(ds) # z, y, x
+    c, h, w = image.shape
 
     # we know these are uint8 gray pictures already
     image = Image.fromarray(image[0])
-
+    
     return image, w, h
 
 def label_parser(filename, anno, class_info, class_mapping):
@@ -50,16 +56,13 @@ def label_parser(filename, anno, class_info, class_mapping):
     class_no = class_mapping[class_name]
 
     # create label
-    label = {
-        'class_no': class_no,
-        'bboxes': []
-    }
+    label = []
 
     # read bboxes for targets
     if class_no == class_mapping['Lung Opacity']:
         anno_rows = anno[anno['patientId'] == patientId]
 
-        for row in anno_rows:
+        for index, row in anno_rows.iterrows():
             # [xmin, ymin, width, height]
             bbox = [
                 row['x'],
@@ -68,10 +71,103 @@ def label_parser(filename, anno, class_info, class_mapping):
                 row['height']
             ]
 
-            label['bboxes'].append(bbox)
+            label.append({
+                'patientId': patientId,
+                'bbox': bbox
+            })
 
-    return patientId, label
+    return label, class_no
 
+# x, y range in percentage
+def generate_percent_bbox(x_min, x_max, y_min, y_max):
+    w = random.uniform(x_min, x_max)
+    h = random.uniform(y_min, y_max)
+
+    x_range = 1. - w
+    y_range = 1. - h
+
+    xmin = random.uniform(0., x_range)
+    ymin = random.uniform(0., y_range)
+
+    return [xmin, ymin, w, h]
+
+def to_pointform(bbox):
+    return [
+        bbox[0],
+        bbox[1],
+        bbox[0] + bbox[2],
+        bbox[1] + bbox[3]
+    ]
+
+def to_bbox(pointform):
+    return [
+        pointform[0],
+        pointform[1],
+        pointform[2] - pointform[0],
+        pointform[3] - pointform[1]
+    ]
+
+def to_percent(bbox, width, height):
+    return [
+        bbox[0] / width,
+        bbox[1] / height,
+        bbox[2] / width,
+        bbox[3] / height
+    ]
+
+def to_absolute(bbox, width, height):
+    return [
+        int(bbox[0] * width),
+        int(bbox[1] * height),
+        int(bbox[2] * width),
+        int(bbox[3] * height)
+    ]
+
+def intersect(box_a, box_b):
+    max_xy = np.minimum(box_a[:, 2:], box_b[2:])
+    min_xy = np.maximum(box_a[:, :2], box_b[:2])
+    inter = np.clip((max_xy - min_xy), a_min=0, a_max=np.inf)
+    return inter[:, 0] * inter[:, 1]
+
+def jaccard_numpy(box_a, box_b):
+    """Compute the jaccard overlap of two sets of boxes.  The jaccard overlap
+    is simply the intersection over union of two boxes.
+    E.g.:
+        A ∩ B / A ∪ B = A ∩ B / (area(A) + area(B) - A ∩ B)
+    Args:
+        box_a: Multiple bounding boxes, Shape: [num_boxes,4]
+        box_b: Single bounding box, Shape: [4]
+    Return:
+        jaccard overlap: Shape: [box_a.shape[0], box_a.shape[1]]
+    """
+    inter = intersect(box_a, box_b)
+    area_a = ((box_a[:, 2]-box_a[:, 0]) *
+              (box_a[:, 3]-box_a[:, 1]))  # [A,B]
+    area_b = ((box_b[2]-box_b[0]) *
+              (box_b[3]-box_b[1]))  # [A,B]
+    union = area_a + area_b - inter
+    return inter / union  # [A,B]
+
+def rsna_collate(batch):
+    images = []
+    gts = []
+    ws = []
+    hs = []
+    ids = []
+
+    for i, sample in enumerate(batch):
+        image, gt, w, h, patientId = sample
+
+        images.append(image)
+        gts.append(torch.from_numpy(gt))
+        ws.append(w)
+        hs.append(h)
+        ids.append(patientId)
+
+    images = torch.stack(images, dim=0) # now, [n, c, h, w]
+    gts = torch.stack(gts, dim=0) # [n, 2]
+
+    return images, gts, ws, hs, ids
 
 class RsnaDataset(Dataset):
     def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', transforms=None):
@@ -86,35 +182,140 @@ class RsnaDataset(Dataset):
         filenames = os.listdir(image_path)
 
         # read labels
-        if phase != 'test':
+        if self.phase != 'test':
             anno_path = os.path.join(self.root, LABEL_FILE)
             self.anno = pd.read_csv(anno_path)
 
             class_path = os.path.join(self.root, CLASS_FILE)
             self.class_info = pd.read_csv(class_path)
 
-            self.labels = {}
-            self.bbox_count = 0
+            self.labels = []
+            self.non_targets = [[] for _ in range(self.num_classes)]
 
-            print('Dataset phase {}, parsing labels...'.format(self.phase, len(filenames)))
+            print('Dataset phase {}, parsing labels...'.format(self.phase))
 
             for filename in tqdm(filenames):
-                patientId, label = label_parser(
+                label, class_no = label_parser(
                     filename,
                     self.anno,
                     self.class_info,
                     self.class_mapping
                 )
-                self.labels[patientId] = label
-                self.bbox_count += len(label['bboxes'])
+
+                if class_no == self.class_mapping['Lung Opacity']:
+                    self.labels.extend(label)
+                else:
+                    self.non_targets[class_no].append((filename.split('.')[0]))
 
             # 1 positive bbox
             # 1 negative bbox in the same pic as positive bbox
             # num_classes - 1 negative bboxes (in non-target pics, 1 for each class)
-            self.total_len = len(self.bbox_count) * (self.num_classes + 1)
+            self.total_len = len(self.labels) * (self.num_classes + 1)
 
     def __len__(self):
         return self.total_len
 
     def __getitem__(self, index):
-        pass
+        if self.phase != 'test':
+            class_no = index // len(self.labels)
+            class_index = index % len(self.labels)
+
+            label = copy.deepcopy(self.labels[class_index])
+
+            if class_no < self.num_classes:
+                if class_no == self.class_mapping['Lung Opacity']:
+                    # directly use the label
+                    # load image
+                    image, w, h = load_dicom_image(os.path.join(
+                        self.root,
+                        self.phase,
+                        '{}.dcm'.format(label['patientId'])
+                    ))
+
+                    label['bbox'] = to_percent(label['bbox'], w, h)
+
+                    roi_class = 1
+                else:
+                    # use bbox in the label to crop from a randomly selected image
+                    class_patients = self.non_targets[class_no]
+                    patientId = random.choice(class_patients)
+
+                    label['patientId'] = patientId
+
+                    # load image
+                    image, w, h = load_dicom_image(os.path.join(
+                        self.root,
+                        self.phase,
+                        '{}.dcm'.format(label['patientId'])
+                    ))
+
+                    label['bbox'] = to_percent(label['bbox'], w, h)
+
+                    roi_class = 0
+            else:
+                # pick a negative bbox from the target
+                # load image
+                image, w, h = load_dicom_image(os.path.join(
+                    self.root,
+                    self.phase,
+                    '{}.dcm'.format(label['patientId'])
+                ))
+
+                # get target bboxes
+                patient_annos = self.anno[self.anno['patientId'] == label['patientId']]
+                patient_label, class_no = label_parser(
+                    '{0}.dcm'.format(label['patientId']),
+                    patient_annos,
+                    self.class_info,
+                    self.class_mapping
+                )
+                patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
+
+                while True: # TODO : limited trails?
+                    new_bbox = generate_percent_bbox(0.007, 0.4, 0.007, 0.8)
+                    # print(patient_bboxes, new_bbox)
+                    sys.stdout.flush()
+                    iou = jaccard_numpy(
+                        np.array([to_pointform(bbox) for bbox in patient_bboxes]),
+                        np.array(to_pointform(new_bbox))
+                    )
+
+                    if (iou < IOU_THRESHOLD).all():
+                        break
+
+                label['bbox'] = new_bbox
+
+                roi_class = 0
+
+            absolute_bbox = to_absolute(label['bbox'], w, h)
+            pt_form = to_pointform(absolute_bbox)
+
+            # create mask
+            mask = np.zeros((h, w, 1), dtype=np.float32)
+            mask[pt_form[1]:pt_form[3], pt_form[0]:pt_form[2], :] = 1.
+            mask = transforms.functional.to_tensor(mask)
+
+            # crop & resize
+            crop = transforms.functional.resized_crop(
+                image,
+                absolute_bbox[1],
+                absolute_bbox[0],
+                absolute_bbox[3],
+                absolute_bbox[2],
+                (h, w)
+            )
+            crop = transforms.functional.to_tensor(crop)
+
+            # stack up image layers - [c, h, w]
+            image = transforms.functional.to_tensor(image)
+
+            layers = torch.cat((image, mask, crop), dim=0)
+            # layers = layers.permute((2, 0, 1))
+
+            # gt
+            global_class = class_no if class_no < self.num_classes else self.num_classes - 1
+            gt = np.array([global_class, roi_class])
+
+            # TODO : transform
+
+            return layers, gt, w, h, label['patientId']
