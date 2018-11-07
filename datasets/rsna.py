@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import imgaug as ia
+from imgaug import augmenters as iaa
 
 import torch
 from torch.utils.data import *
@@ -28,6 +30,7 @@ CLASS_MAPPING = {
     'Lung Opacity': 2
 }
 IOU_THRESHOLD = 0.2
+IA_SEED = 1
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
 if sys.platform == 'linux':
@@ -177,6 +180,8 @@ class RsnaDataset(Dataset):
         self.phase = phase
         self.transforms = transforms
 
+        ia.seed(IA_SEED)
+
         # list images
         image_path = os.path.join(self.root, self.phase)
         filenames = os.listdir(image_path)
@@ -192,26 +197,43 @@ class RsnaDataset(Dataset):
             self.labels = []
             self.non_targets = [[] for _ in range(self.num_classes)]
 
-            print('Dataset phase {}, parsing labels...'.format(self.phase))
+            print('Dataset phase {}'.format(self.phase))
 
-            for filename in tqdm(filenames):
-                label, class_no = label_parser(
-                    filename,
-                    self.anno,
-                    self.class_info,
-                    self.class_mapping
-                )
+            # get all target boxes
+            print('Parsing targets:')
+            target_rows = self.class_info[self.class_info['class'] == 'Lung Opacity']
+            
+            with tqdm(total=len(target_rows)) as pbar:
+                for i, target_row in target_rows.iterrows():
+                    pbar.update(1)
 
-                if class_no == self.class_mapping['Lung Opacity']:
-                    self.labels.extend(label)
-                else:
-                    self.non_targets[class_no].append((filename.split('.')[0]))
+                    filename = '{0}.dcm'.format(target_row['patientId'])
+                    if filename in filenames:
+                        label, class_no = label_parser(
+                            filename,
+                            self.anno,
+                            self.class_info,
+                            self.class_mapping
+                        )
+                        self.labels.extend(label)
+
+            # non-targets
+            print('Parsing non-targets:')
+            non_target_rows = self.class_info[self.class_info['class'] != 'Lung Opacity']
+
+            with tqdm(total=len(non_target_rows)) as pbar:
+                for i, non_target_row in tqdm(non_target_rows.iterrows()):
+                    pbar.update(1)
+                    
+                    if '{0}.dcm'.format(non_target_row['patientId']) in filenames:
+                        class_no = self.class_mapping[non_target_row['class']]
+                        self.non_targets[class_no].append(non_target_row['patientId'])
 
             # 1 positive bbox
             # 1 negative bbox in the same pic as positive bbox
             # num_classes - 1 negative bboxes (in non-target pics, 1 for each class)
             self.total_len = len(self.labels) * (self.num_classes + 1)
-
+            
     def __len__(self):
         return self.total_len
 
@@ -287,13 +309,38 @@ class RsnaDataset(Dataset):
 
                 roi_class = 0
 
+            # bounding box transformation
             absolute_bbox = to_absolute(label['bbox'], w, h)
             pt_form = to_pointform(absolute_bbox)
+
+            # imgaug transform
+            if self.transforms is not None:
+                transforms_det = self.transforms.to_deterministic()
+
+                np_image = np.asarray(image)
+                np_image = np_image[:, :, np.newaxis]
+
+                bbs = ia.BoundingBoxesOnImage(
+                    [ ia.BoundingBox(x1=pt_form[0], y1=pt_form[1], x2=pt_form[2], y2=pt_form[3]) ],
+                    shape=np_image.shape
+                )
+
+                # transforms
+                np_image_aug = transforms_det.augment_images([np_image])[0]
+                bbs_aug = transforms_det.augment_bounding_boxes([bbs])[0]
+
+                # convert to PIL image
+                image = Image.fromarray(np.array(np_image_aug).squeeze())
+
+                # populate bbox represents
+                pt_bbox = bbs_aug.bounding_boxes[0]
+                pt_form = [pt_bbox.x1_int, pt_bbox.y1_int, pt_bbox.x2_int, pt_bbox.y2_int]
+                absolute_bbox = to_bbox(pt_form)
+                label['bbox'] = to_percent(absolute_bbox, w, h)
 
             # create mask
             mask = np.zeros((h, w, 1), dtype=np.float32)
             mask[pt_form[1]:pt_form[3], pt_form[0]:pt_form[2], :] = 1.
-            mask = transforms.functional.to_tensor(mask)
 
             # crop & resize
             crop = transforms.functional.resized_crop(
@@ -304,18 +351,16 @@ class RsnaDataset(Dataset):
                 absolute_bbox[2],
                 (h, w)
             )
+
+            # create tensor and cat image layers - [c, h, w]
+            image = transforms.functional.to_tensor(image)
+            mask = transforms.functional.to_tensor(mask)
             crop = transforms.functional.to_tensor(crop)
 
-            # stack up image layers - [c, h, w]
-            image = transforms.functional.to_tensor(image)
-
             layers = torch.cat((image, mask, crop), dim=0)
-            # layers = layers.permute((2, 0, 1))
 
             # gt
             global_class = class_no if class_no < self.num_classes else self.num_classes - 1
             gt = np.array([global_class, roi_class])
-
-            # TODO : transform
 
             return layers, gt, w, h, label['patientId']
