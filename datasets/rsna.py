@@ -162,13 +162,12 @@ def rsna_collate(batch):
         image, gt, w, h, patientId = sample
 
         images.append(image)
-        gts.append(torch.from_numpy(gt))
+        gts.append(gt)
         ws.append(w)
         hs.append(h)
         ids.append(patientId)
 
     images = torch.stack(images, dim=0) # now, [n, c, h, w]
-    gts = torch.stack(gts, dim=0) # [n, 2]
 
     return images, gts, ws, hs, ids
 
@@ -342,9 +341,9 @@ class RsnaDataset(Dataset):
                     absolute_bbox = to_bbox(pt_form)
                     label['bbox'] = to_percent(absolute_bbox, w, h)
 
-            # create mask
-            mask = np.zeros((h, w, 1), dtype=np.float32)
-            mask[pt_form[1]:pt_form[3], pt_form[0]:pt_form[2], :] = 1.
+            # create mask - 255(uint8) and 1.0(float32) are both ok
+            mask = np.zeros((h, w, 1), dtype=np.uint8)
+            mask[pt_form[1]:pt_form[3], pt_form[0]:pt_form[2], :] = 255
 
             # crop & resize
             crop = transforms.functional.resized_crop(
@@ -365,6 +364,6 @@ class RsnaDataset(Dataset):
 
             # gt
             global_class = class_no if class_no < self.num_classes else self.num_classes - 1
-            gt = np.array([global_class, roi_class])
+            gt = [global_class, roi_class]
 
             return layers, gt, w, h, label['patientId']

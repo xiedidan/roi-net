@@ -34,21 +34,12 @@ class DenseNet121(nn.Module):
 
         self.densenet121 = torchvision.models.densenet121(pretrained=True)
 
+        # save number of feature from pre-trained classifier
         num_ftrs = self.densenet121.classifier.in_features
 
+        # create our classifier heads
         self.densenet121.classifier = nn.Sequential(
             nn.Linear(num_ftrs, out_size),
-            nn.Sigmoid()
-        )
-
-        # roi heads - class and iou
-        self.densenet121.roi_classifier = nn.Sequential(
-            nn.Linear(num_ftrs, out_size),
-            nn.Sigmoid()
-        )
-
-        self.densenet121.roi_iou = nn.Sequential(
-            nn.Linear(num_ftrs, 1),
             nn.Sigmoid()
         )
 
@@ -56,16 +47,27 @@ class DenseNet121(nn.Module):
         features = self.densenet121.features(x)
 
         out = F.relu(features, inplace=True)
-        out = F.avg_pool2d(out, kernel_size=7, stride=1).view(features.size(0), -1)
+        out = F.avg_pool2d(out, kernel_size=32, stride=1).view(features.size(0), -1)
 
-        cls_out = self.densenet121.classifier(out)
-        roi_cls_out = self.densenet121.roi_classifier(out)
-        roi_iou_out = self.densenet121.roi_iou(out)
+        out = self.densenet121.classifier(out)
 
-        return [cls_out, roi_cls_out, roi_iou_out]
+        return out
 
     def transfer(self, state_dict):
         # load pretrained chexnet parameters (from old pytorch version)
-        my_state_dict = convert_model(state_dict)
+        new_state_dict = convert_model(state_dict)
+
+        # filter out classifier parameters
+        classifier_names = [
+            'densenet121.classifier.0.weight',
+            'densenet121.classifier.0.bias'
+        ]
+        my_state_dict = self.state_dict()
+        new_state_list = list(new_state_dict.keys())
+
+        for layer_name in new_state_list:
+            if layer_name not in classifier_names:
+                my_state_dict[layer_name] = new_state_dict[layer_name]
+
         self.load_state_dict(my_state_dict)
         

@@ -1,7 +1,10 @@
-import torch
+import os
 
 import matplotlib.pyplot as plt
-plt.switch_backend('tkagg')
+if "DISPLAY" not in os.environ:
+    plt.switch_backend('agg')
+else:
+    plt.switch_backend('tkagg')
 import matplotlib.patches as patches
 from matplotlib import colors as mcolors
 import numpy as np
@@ -43,10 +46,13 @@ def plot_batch(images):
     for i in range(cols):
         for j in range(rows):
             image = images[i, j]
+            ax = axs[j][i]
 
-            axs[j][i].imshow(image, cmap='gray')
-            axs[j][i].set_xticks([])
-            axs[j][i].set_yticks([])
+            im = ax.imshow(image, cmap='gray')
+            f.colorbar(im, ax=ax, shrink=0.75)
+
+            ax.set_xticks([])
+            ax.set_yticks([])
             
     plt.tight_layout()
     plt.ioff()
