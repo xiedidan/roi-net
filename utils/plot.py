@@ -1,6 +1,7 @@
 import torch
 
 import matplotlib.pyplot as plt
+plt.switch_backend('tkagg')
 import matplotlib.patches as patches
 from matplotlib import colors as mcolors
 import numpy as np
@@ -50,6 +51,6 @@ def plot_batch(images):
     plt.tight_layout()
     plt.ioff()
 
-    max_window() 
+    # max_window() 
 
     plt.show()

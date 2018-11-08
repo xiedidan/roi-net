@@ -328,15 +328,19 @@ class RsnaDataset(Dataset):
                 # transforms
                 np_image_aug = transforms_det.augment_images([np_image])[0]
                 bbs_aug = transforms_det.augment_bounding_boxes([bbs])[0]
+                bbs_aug = bbs_aug.remove_out_of_image()
 
-                # convert to PIL image
-                image = Image.fromarray(np.array(np_image_aug).squeeze())
+                # if there's no bbox after augmentation
+                # just fallback to original sample
+                if len(bbs_aug.bounding_boxes) > 0:
+                    # convert to PIL image
+                    image = Image.fromarray(np.array(np_image_aug).squeeze())
 
-                # populate bbox represents
-                pt_bbox = bbs_aug.bounding_boxes[0]
-                pt_form = [pt_bbox.x1_int, pt_bbox.y1_int, pt_bbox.x2_int, pt_bbox.y2_int]
-                absolute_bbox = to_bbox(pt_form)
-                label['bbox'] = to_percent(absolute_bbox, w, h)
+                    # populate bbox represents
+                    pt_bbox = bbs_aug.bounding_boxes[0]
+                    pt_form = [pt_bbox.x1_int, pt_bbox.y1_int, pt_bbox.x2_int, pt_bbox.y2_int]
+                    absolute_bbox = to_bbox(pt_form)
+                    label['bbox'] = to_percent(absolute_bbox, w, h)
 
             # create mask
             mask = np.zeros((h, w, 1), dtype=np.float32)
