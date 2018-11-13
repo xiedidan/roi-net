@@ -37,8 +37,25 @@ optional arguments:
   --plot                plot loss and accuracy
 ```
 ## Evaluation
-tbf  
+```
+usage: eval.py [-h] [--batch_size BATCH_SIZE] [--checkpoint CHECKPOINT]
+               [--root ROOT] [--parallel] [--device DEVICE]
+
+Pneumonia Verifier Evaluation
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --batch_size BATCH_SIZE
+                        batch size
+  --checkpoint CHECKPOINT
+                        checkpoint file path
+  --root ROOT           dataset root path
+  --parallel            run with multiple GPUs
+  --device DEVICE       device (cuda / cpu)
+```
 ## Tips
+### Custom dataset
+You could implement your custom dataset. Transformation and augmentation should be implemented in YourCustomDataset.``__get_item__()``  
 ### Problemic imgaug bbox augmentation
 Current version (0.2.6) of imgaug has bbox augmentation problem. It may produce zero area bbox and raise an internal assertion failure. One way to fix this is directly return original bbox if problemic bbox is detected (edit augment_bounding_boxes method in Augmenter class, in imgaug\augmenters\meta.py):
 ```python
