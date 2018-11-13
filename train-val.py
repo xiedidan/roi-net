@@ -10,6 +10,7 @@ from densenet import *
 from datasets.rsna import *
 from utils.plot import *
 
+from PIL import Image
 import imgaug as ia
 from imgaug import augmenters as iaa
 from tqdm import tqdm
@@ -25,11 +26,15 @@ import torchvision.transforms as transforms
 
 # constants & configs
 num_classes = 4
-snapshot_interval = 5000
+snapshot_interval = 1000
+IMAGE_SIZE = 512
 
-# spawned workers on windows take too much gmem
-number_workers = 8
+# on linux, each worker could take 300% of cpu
+# so 2 workers are enough for a 4 core machine
+number_workers = 2
 if sys.platform == 'win32':
+    # spawned workers on windows take too much gmem
+    # so keep lower number of workers
     number_workers = 2
 
 # variables
@@ -90,6 +95,7 @@ parser.add_argument('--resume', '-r', action='store_true', help='resume from che
 parser.add_argument('--transfer', action='store_true', help='fintune pretrained model')
 parser.add_argument('--checkpoint', default='./checkpoint/checkpoint.pth', help='checkpoint file path')
 parser.add_argument('--root', default='./rsna-pneumonia-detection-challenge/', help='dataset root path')
+parser.add_argument('--parallel', action='store_true', help='run with multiple GPUs')
 parser.add_argument('--device', default='cuda:0', help='device (cuda / cpu)')
 parser.add_argument('--plot', action='store_true', help='plot loss and accuracy')
 flags = parser.parse_args()
@@ -114,13 +120,20 @@ augmentation = iaa.Sequential([
     iaa.OneOf([ ## blur or sharpen
         iaa.GaussianBlur(sigma=(0.0, 0.1)),
         iaa.Sharpen(alpha=(0.0, 0.1)),
-    ]),
+    ])  
 ])
+
+# image transforms
+transformation = transforms.Resize(
+    size=IMAGE_SIZE,
+    interpolation=Image.NEAREST
+)
 
 trainSet = RsnaDataset(
     root=flags.root,
     phase='train',
-    transforms=augmentation
+    augment=augmentation,
+    transform=transformation
 )
 
 trainLoader = torch.utils.data.DataLoader(
@@ -134,7 +147,8 @@ trainLoader = torch.utils.data.DataLoader(
 valSet = RsnaDataset(
     root=flags.root,
     phase='val',
-    transforms=None
+    augment=None,
+    transform=transformation
 )
 
 valLoader = torch.utils.data.DataLoader(
@@ -171,8 +185,8 @@ optimizer = optim.SGD(
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     'min',
-    factor=0.2,
-    patience=20,
+    factor=0.25,
+    patience=5,
     verbose=True
 )
 
@@ -191,12 +205,12 @@ def train(epoch):
 
         optimizer.zero_grad()
 
-        if torch.cuda.device_count() > 1:
+        if torch.cuda.device_count() > 1 and flags.parallel:
             outputs = nn.parallel.data_parallel(model, images)
         else:
             outputs = model(images)
         
-        if torch.cuda.device_count() > 1:
+        if torch.cuda.device_count() > 1 and flags.parallel:
             loss = nn.parallel.data_parallel(criterion, (outputs, gts))
         else:
             loss = criterion(outputs, gts)
@@ -233,12 +247,12 @@ def val(epoch):
             gts = encode_gt(gts)
             gts = torch.tensor(gts, device=device, dtype=torch.long)
 
-            if torch.cuda.device_count() > 1:
+            if torch.cuda.device_count() > 1 and flags.parallel:
                 outputs = nn.parallel.data_parallel(model, images)
             else:
                 outputs = model(images)
 
-            if torch.cuda.device_count() > 1:
+            if torch.cuda.device_count() > 1 and flags.parallel:
                 loss = nn.parallel.data_parallel(criterion, (outputs, gts))
             else:
                 loss = criterion(outputs, gts)

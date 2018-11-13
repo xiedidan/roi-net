@@ -61,7 +61,7 @@ def label_parser(filename, anno, class_info, class_mapping):
     # create label
     label = []
 
-    # read bboxes for targets
+    # read absolute corner form bbox for targets
     if class_no == class_mapping['Lung Opacity']:
         anno_rows = anno[anno['patientId'] == patientId]
 
@@ -82,7 +82,7 @@ def label_parser(filename, anno, class_info, class_mapping):
     return label, class_no
 
 # x, y range in percentage
-def generate_percent_bbox(x_min, x_max, y_min, y_max):
+def generate_percent_corner(x_min, x_max, y_min, y_max):
     w = random.uniform(x_min, x_max)
     h = random.uniform(y_min, y_max)
 
@@ -94,20 +94,20 @@ def generate_percent_bbox(x_min, x_max, y_min, y_max):
 
     return [xmin, ymin, w, h]
 
-def to_pointform(bbox):
+def to_point(corner):
     return [
-        bbox[0],
-        bbox[1],
-        bbox[0] + bbox[2],
-        bbox[1] + bbox[3]
+        corner[0],
+        corner[1],
+        corner[0] + corner[2],
+        corner[1] + corner[3]
     ]
 
-def to_bbox(pointform):
+def to_corner(point):
     return [
-        pointform[0],
-        pointform[1],
-        pointform[2] - pointform[0],
-        pointform[3] - pointform[1]
+        point[0],
+        point[1],
+        point[2] - point[0],
+        point[3] - point[1]
     ]
 
 def to_percent(bbox, width, height):
@@ -172,12 +172,13 @@ def rsna_collate(batch):
     return images, gts, ws, hs, ids
 
 class RsnaDataset(Dataset):
-    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', transforms=None):
+    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, transform=None):
         self.root = root
         self.class_mapping = class_mapping
         self.num_classes = num_classes
         self.phase = phase
-        self.transforms = transforms
+        self.augments = augment
+        self.transforms = transform
 
         ia.seed(IA_SEED)
 
@@ -293,12 +294,10 @@ class RsnaDataset(Dataset):
                 patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
 
                 while True: # TODO : limited trails?
-                    new_bbox = generate_percent_bbox(0.007, 0.4, 0.007, 0.8)
-                    # print(patient_bboxes, new_bbox)
-                    sys.stdout.flush()
+                    new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
                     iou = jaccard_numpy(
-                        np.array([to_pointform(bbox) for bbox in patient_bboxes]),
-                        np.array(to_pointform(new_bbox))
+                        np.array([to_point(bbox) for bbox in patient_bboxes]),
+                        np.array(to_point(new_bbox))
                     )
 
                     if (iou < IOU_THRESHOLD).all():
@@ -308,59 +307,70 @@ class RsnaDataset(Dataset):
 
                 roi_class = 0
 
-            # bounding box transformation
-            absolute_bbox = to_absolute(label['bbox'], w, h)
-            pt_form = to_pointform(absolute_bbox)
-
-            # imgaug transform
+            # image transforms
             if self.transforms is not None:
-                transforms_det = self.transforms.to_deterministic()
+                new_image = self.transforms(image)
+                new_w, new_h = new_image.size # Image.size returns (w, h)
+            else:
+                new_image = image
+                new_w = w
+                new_h = h
 
-                np_image = np.asarray(image)
+            # bounding box transformation - label['bbox'] is p_cn
+            new_a_cn = to_absolute(label['bbox'], new_w, new_h)
+            new_a_pt = to_point(new_a_cn)
+
+            # imgaug augments
+            if self.augments is not None:
+                augments_det = self.augments.to_deterministic()
+
+                np_image = np.asarray(new_image)
                 np_image = np_image[:, :, np.newaxis]
 
                 bbs = ia.BoundingBoxesOnImage(
-                    [ ia.BoundingBox(x1=pt_form[0], y1=pt_form[1], x2=pt_form[2], y2=pt_form[3]) ],
+                    [ ia.BoundingBox(x1=new_a_pt[0], y1=new_a_pt[1], x2=new_a_pt[2], y2=new_a_pt[3]) ],
                     shape=np_image.shape
                 )
 
                 # transforms
-                np_image_aug = transforms_det.augment_images([np_image])[0]
-                bbs_aug = transforms_det.augment_bounding_boxes([bbs])[0]
+                np_image_aug = augments_det.augment_images([np_image])[0]
+
+                bbs_aug = augments_det.augment_bounding_boxes([bbs])[0]
                 bbs_aug = bbs_aug.remove_out_of_image()
 
                 # if there's no bbox after augmentation
                 # just fallback to original sample
                 if len(bbs_aug.bounding_boxes) > 0:
                     # convert to PIL image
-                    image = Image.fromarray(np.array(np_image_aug).squeeze())
+                    new_image = Image.fromarray(np.array(np_image_aug).squeeze())
 
                     # populate bbox represents
-                    pt_bbox = bbs_aug.bounding_boxes[0]
-                    pt_form = [pt_bbox.x1_int, pt_bbox.y1_int, pt_bbox.x2_int, pt_bbox.y2_int]
-                    absolute_bbox = to_bbox(pt_form)
-                    label['bbox'] = to_percent(absolute_bbox, w, h)
+                    new_a_pt_aug = bbs_aug.bounding_boxes[0]
+                    new_a_pt = [new_a_pt_aug.x1_int, new_a_pt_aug.y1_int, new_a_pt_aug.x2_int, new_a_pt_aug.y2_int]
+                    new_a_cn = to_corner(new_a_pt)
+
+                    label['bbox'] = to_percent(new_a_cn, new_w, new_h) # p_cn
 
             # create mask - 255(uint8) and 1.0(float32) are both ok
-            mask = np.zeros((h, w, 1), dtype=np.uint8)
-            mask[pt_form[1]:pt_form[3], pt_form[0]:pt_form[2], :] = 255
+            mask = np.zeros((new_h, new_w, 1), dtype=np.uint8)
+            mask[new_a_pt[1]:new_a_pt[3], new_a_pt[0]:new_a_pt[2], :] = 255
 
             # crop & resize
             crop = transforms.functional.resized_crop(
-                image,
-                absolute_bbox[1],
-                absolute_bbox[0],
-                absolute_bbox[3],
-                absolute_bbox[2],
-                (h, w)
+                new_image,
+                new_a_cn[1],
+                new_a_cn[0],
+                new_a_cn[3],
+                new_a_cn[2],
+                (new_h, new_w)
             )
 
             # create tensor and cat image layers - [c, h, w]
-            image = transforms.functional.to_tensor(image)
+            new_image = transforms.functional.to_tensor(new_image)
             mask = transforms.functional.to_tensor(mask)
             crop = transforms.functional.to_tensor(crop)
 
-            layers = torch.cat((image, mask, crop), dim=0)
+            layers = torch.cat((new_image, mask, crop), dim=0)
 
             # gt
             global_class = class_no if class_no < self.num_classes else self.num_classes - 1

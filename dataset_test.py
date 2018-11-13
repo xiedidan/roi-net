@@ -14,6 +14,9 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 
+# config
+IMAGE_SIZE = 256
+
 # argparser
 parser = argparse.ArgumentParser(description='RSNA dataset toolkit')
 parser.add_argument('--root', default='./rsna/', help='dataset root path')
@@ -41,23 +44,29 @@ if __name__ == '__main__':
         ]),
     ])
 
+    transformation = transforms.Resize(
+        size=IMAGE_SIZE,
+        interpolation=Image.NEAREST
+    )
+
     # data
     trainSet = RsnaDataset(
         root=flags.root,
         phase='train',
-        transforms=augmentation
+        augment=augmentation,
+        transform=transformation
     )
 
     trainLoader = torch.utils.data.DataLoader(
         trainSet,
         batch_size=4,
         shuffle=True,
-        num_workers=1,
+        num_workers=2,
         collate_fn=rsna_collate
     )
 
     for images, gts, ws, hs, ids in tqdm(trainLoader):
-        for gt, patientId in zip(gts.numpy(), ids):
+        for gt, patientId in zip(gts, ids):
             print('patientId: {}, global: {}, roi: {}'.format(
                 patientId,
                 list(trainSet.class_mapping.keys())[gt[0]],
@@ -65,3 +74,4 @@ if __name__ == '__main__':
             ))
 
         plot_batch(images)
+

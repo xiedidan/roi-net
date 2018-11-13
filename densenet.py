@@ -45,9 +45,11 @@ class DenseNet121(nn.Module):
 
     def forward(self, x):
         features = self.densenet121.features(x)
-
         out = F.relu(features, inplace=True)
-        out = F.avg_pool2d(out, kernel_size=32, stride=1).view(features.size(0), -1)
+        
+        feature_size = out.shape[-1] # get w
+
+        out = F.avg_pool2d(out, kernel_size=feature_size, stride=1).view(features.size(0), -1)
 
         out = self.densenet121.classifier(out)
 
