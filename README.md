@@ -56,6 +56,8 @@ optional arguments:
 ## Tips
 ### Custom dataset
 You could implement your custom dataset. Transformation and augmentation should be implemented in YourCustomDataset.``__get_item__()``  
+### Unstable eval results
+Since negative bboxes are randomly picked, validation / evaluation results would be unstable between different runs. This couldn't be solved by simply setting random seed. We'll look into this problem later.  
 ### Problemic imgaug bbox augmentation
 Current version (0.2.6) of imgaug has bbox augmentation problem. It may produce zero area bbox and raise an internal assertion failure. One way to fix this is directly return original bbox if problemic bbox is detected (edit augment_bounding_boxes method in Augmenter class, in imgaug\augmenters\meta.py):
 ```python

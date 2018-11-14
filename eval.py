@@ -83,7 +83,7 @@ transformation = transforms.Resize(
 
 valSet = RsnaDataset(
     root=flags.root,
-    phase='val',
+    phase='eval',
     augment=None,
     transform=transformation
 )
@@ -112,12 +112,11 @@ def eval():
     with torch.no_grad():
         model.eval()
 
-        val_loss = 0.
-        val_accu = 0.
-        batch_count = len(valLoader)
+        val_loss = []
+        val_accu = []
 
         # perfrom forward
-        for batch_index, (images, gts, ws, hs, ids) in enumerate(valLoader):
+        for images, gts, ws, hs, ids in tqdm(valLoader):
             images = images.to(device)
 
             gts = encode_gt(gts)
@@ -136,8 +135,7 @@ def eval():
             results = results.to(dtype=torch.long)
             scores = torch.eq(results, gts).to(dtype=torch.float32)
 
-            score = scores.mean()
-            val_accu += score.item()
+            val_accu.append(scores.detach())
 
             # loss
             if torch.cuda.device_count() > 1 and flags.parallel:
@@ -145,24 +143,17 @@ def eval():
             else:
                 loss = criterion(outputs, gts)
 
-            loss = loss.mean()
-            val_loss += loss.item()
+            val_loss.append(loss.detach()) 
+        
+        val_accu = torch.cat(val_accu)
+        val_loss = torch.cat(val_loss)
 
-            print('b:{}/{}, b_l:{:.2f}, avg_l:{:.2f}, b_a:{:.2f}, avg_a:{:.2f}'.format(
-                batch_index,
-                batch_count - 1,
-                loss.item(),
-                val_loss / (batch_index + 1),
-                score.item(),
-                val_accu / (batch_index + 1)
-            ))
+        avg_accu = val_accu.mean().item()
+        avg_loss = val_loss.mean().item()
 
-        val_loss /= batch_count
-        val_accu /= batch_count
-
-        print('avg_loss:{:.2f}, avg_accuracy: {:.2f}'.format(
-            val_loss,
-            val_accu
+        print('avg_loss:{}, avg_accuracy: {}'.format(
+            avg_loss,
+            avg_accu
         ))
 
 # ok, main loop
