@@ -53,6 +53,8 @@ optional arguments:
   --parallel            run with multiple GPUs
   --device DEVICE       device (cuda / cpu)
 ```
+We trained roi-net with some chest x-ray dataset to predict 1 of 4 cases, and 85% accuracy is archived after 21 epochs.  
+![](doc/roi-transfer.png)  
 ## Tips
 ### Custom dataset
 You could implement your custom dataset. Transformation and augmentation should be implemented in YourCustomDataset.``__get_item__()``  

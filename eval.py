@@ -5,6 +5,9 @@ import pickle
 import argparse
 import pickle
 import itertools
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set()
 
 from densenet import *
 from datasets.rsna import *
@@ -64,6 +67,17 @@ def encode_gt(gts):
 
     return result
 
+def calc_transfer_matrix(a, b, num_states):
+    transfer_matrix = np.zeros((num_states, num_states))
+    count = a.shape[0]
+
+    for i in range(count):
+            transfer_matrix[a[i]][b[i]] += 1
+
+    transfer_matrix /= a.shape[0]
+
+    return transfer_matrix
+
 # argparser
 parser = argparse.ArgumentParser(description='Pneumonia Verifier Evaluation')
 parser.add_argument('--batch_size', default=4, type=int, help='batch size')
@@ -114,6 +128,8 @@ def eval():
 
         val_loss = []
         val_accu = []
+        val_gts = []
+        val_results = []
 
         # perfrom forward
         for images, gts, ws, hs, ids in tqdm(valLoader):
@@ -144,6 +160,9 @@ def eval():
                 loss = criterion(outputs, gts)
 
             val_loss.append(loss.detach()) 
+
+            val_gts.append(gts)
+            val_results.append(results)
         
         val_accu = torch.cat(val_accu)
         val_loss = torch.cat(val_loss)
@@ -155,6 +174,19 @@ def eval():
             avg_loss,
             avg_accu
         ))
+
+        val_gts = torch.cat(val_gts)
+        val_results = torch.cat(val_results)
+
+        matrix = calc_transfer_matrix(
+            val_gts.cpu().numpy(),
+            val_results.cpu().numpy(),
+            num_classes
+        )
+
+        f, ax = plt.subplots(figsize=(num_classes, num_classes))
+        sns.heatmap(matrix, annot=True, linewidths=.5, ax=ax)
+        plt.show()
 
 # ok, main loop
 if __name__ == '__main__':
