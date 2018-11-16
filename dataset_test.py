@@ -44,6 +44,19 @@ if __name__ == '__main__':
         ]),
     ])
 
+    # bbox augmentation
+    bbox_augmentation = iaa.Sequential([
+        iaa.OneOf([
+            # geometry transform - keep lowest IOU around 0.8
+            iaa.Affine(
+                scale={"x": (0.9, 1.1), "y": (0.9, 1.1)},
+            ),
+            iaa.Affine(
+                translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+            )
+        ])
+    ])
+
     transformation = transforms.Resize(
         size=IMAGE_SIZE,
         interpolation=Image.NEAREST
@@ -54,6 +67,7 @@ if __name__ == '__main__':
         root=flags.root,
         phase='train',
         augment=augmentation,
+        bbox_augment=bbox_augmentation,
         transform=transformation
     )
 
@@ -74,4 +88,3 @@ if __name__ == '__main__':
             ))
 
         plot_batch(images)
-

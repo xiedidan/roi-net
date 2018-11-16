@@ -29,7 +29,10 @@ CLASS_MAPPING = {
     'No Lung Opacity / Not Normal': 1,
     'Lung Opacity': 2
 }
-IOU_THRESHOLD = 0.2
+IOU_MIN_THRESHOLD = 0.4
+IOU_MAX_THRESHOLD = 0.75
+MIN_ASPECT_RATIO = 0.25
+MAX_ASPECT_RATIO = 3
 IA_SEED = 1
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
@@ -93,6 +96,15 @@ def generate_percent_corner(x_min, x_max, y_min, y_max):
     ymin = random.uniform(0., y_range)
 
     return [xmin, ymin, w, h]
+
+def transform_percent_corner(p_cn):
+    x = random.uniform(p_cn[0] - p_cn[2] * 0.176, p_cn[0] + p_cn[2] * 0.176)
+    y = random.uniform(p_cn[1] - p_cn[3] * 0.176, p_cn[1] + p_cn[3] * 0.176)
+
+    w = random.uniform(p_cn[2] * 0.7, p_cn[2] * 1.4)
+    h = random.uniform(p_cn[3] * 0.7, p_cn[3] * 1.4)
+
+    return [x, y, w, h]
 
 def to_point(corner):
     return [
@@ -172,12 +184,13 @@ def rsna_collate(batch):
     return images, gts, ws, hs, ids
 
 class RsnaDataset(Dataset):
-    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, transform=None):
+    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, bbox_augment=None, transform=None):
         self.root = root
         self.class_mapping = class_mapping
         self.num_classes = num_classes
         self.phase = phase
         self.augments = augment
+        self.bbox_augments = bbox_augment
         self.transforms = transform
 
         ia.seed(IA_SEED)
@@ -242,11 +255,10 @@ class RsnaDataset(Dataset):
             class_no = index // len(self.labels)
             class_index = index % len(self.labels)
 
-            label = copy.deepcopy(self.labels[class_index])
+            label = copy.deepcopy(self.labels[class_index]) # for now, label is a_cn
 
             if class_no < self.num_classes:
                 if class_no == self.class_mapping['Lung Opacity']:
-                    # directly use the label
                     # load image
                     image, w, h = load_dicom_image(os.path.join(
                         self.root,
@@ -254,11 +266,33 @@ class RsnaDataset(Dataset):
                         '{}.dcm'.format(label['patientId'])
                     ))
 
-                    label['bbox'] = to_percent(label['bbox'], w, h)
+                    # get target bboxes
+                    patient_annos = self.anno[self.anno['patientId'] == label['patientId']]
+                    patient_label, class_no = label_parser(
+                        '{0}.dcm'.format(label['patientId']),
+                        patient_annos,
+                        self.class_info,
+                        self.class_mapping
+                    )
+                    patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
+
+                    # randomly generate a bbox
+                    while True: # TODO : limited trails?
+                        new_bbox = transform_percent_corner(to_percent(label['bbox'], w, h))
+                        iou = jaccard_numpy(
+                            np.array([to_point(bbox) for bbox in patient_bboxes]),
+                            np.array(to_point(new_bbox))
+                        )
+                        aspect_ratio = new_bbox[2] / new_bbox[3]
+
+                        if (iou > IOU_MAX_THRESHOLD).any() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
+                            break
+
+                    label['bbox'] = new_bbox
 
                     roi_class = 1
                 else:
-                    # use bbox in the label to crop from a randomly selected image
+                    # randomly select a negative image                    
                     class_patients = self.non_targets[class_no]
                     patientId = random.choice(class_patients)
 
@@ -271,11 +305,18 @@ class RsnaDataset(Dataset):
                         '{}.dcm'.format(label['patientId'])
                     ))
 
-                    label['bbox'] = to_percent(label['bbox'], w, h)
+                    # randomly generate a bbox
+                    while True: # TODO : limited trails?
+                        new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
+                        aspect_ratio = new_bbox[2] / new_bbox[3]
+
+                        if MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO:
+                            break
+
+                    label['bbox'] = new_bbox
 
                     roi_class = 0
             else:
-                # pick a negative bbox from the target
                 # load image
                 image, w, h = load_dicom_image(os.path.join(
                     self.root,
@@ -293,14 +334,16 @@ class RsnaDataset(Dataset):
                 )
                 patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
 
+                # randomly generate a bbox
                 while True: # TODO : limited trails?
                     new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
                     iou = jaccard_numpy(
                         np.array([to_point(bbox) for bbox in patient_bboxes]),
                         np.array(to_point(new_bbox))
                     )
+                    aspect_ratio = new_bbox[2] / new_bbox[3]
 
-                    if (iou < IOU_THRESHOLD).all():
+                    if (iou < IOU_MIN_THRESHOLD).all() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
                         break
 
                 label['bbox'] = new_bbox
