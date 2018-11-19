@@ -4,6 +4,7 @@ import pickle
 import math
 import random
 import copy
+import logging
 
 import pydicom
 import SimpleITK as sitk
@@ -34,6 +35,7 @@ IOU_MAX_THRESHOLD = 0.75
 MIN_ASPECT_RATIO = 0.25
 MAX_ASPECT_RATIO = 3
 IA_SEED = 1
+TRAIL_INTERVAL = 100
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
 if sys.platform == 'linux':
@@ -184,7 +186,7 @@ def rsna_collate(batch):
     return images, gts, ws, hs, ids
 
 class RsnaDataset(Dataset):
-    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, bbox_augment=None, transform=None):
+    def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, bbox_augment=None, transform=None, logger_name='rsna'):
         self.root = root
         self.class_mapping = class_mapping
         self.num_classes = num_classes
@@ -192,6 +194,7 @@ class RsnaDataset(Dataset):
         self.augments = augment
         self.bbox_augments = bbox_augment
         self.transforms = transform
+        self.logger = logging.getLogger(logger_name)
 
         ia.seed(IA_SEED)
 
@@ -257,6 +260,8 @@ class RsnaDataset(Dataset):
 
             label = copy.deepcopy(self.labels[class_index]) # for now, label is a_cn
 
+            trail = 0
+
             if class_no < self.num_classes:
                 if class_no == self.class_mapping['Lung Opacity']:
                     # load image
@@ -278,6 +283,8 @@ class RsnaDataset(Dataset):
 
                     # randomly generate a bbox
                     while True: # TODO : limited trails?
+                        trail += 1
+
                         new_bbox = transform_percent_corner(to_percent(label['bbox'], w, h))
                         iou = jaccard_numpy(
                             np.array([to_point(bbox) for bbox in patient_bboxes]),
@@ -287,6 +294,12 @@ class RsnaDataset(Dataset):
 
                         if (iou > IOU_MAX_THRESHOLD).any() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
                             break
+
+                        if trail % TRAIL_INTERVAL == 0:
+                            self.logger.debug('class_no: {}, trail: {}'.format(
+                                class_no,
+                                trail
+                            ))
 
                     label['bbox'] = new_bbox
 
@@ -307,11 +320,19 @@ class RsnaDataset(Dataset):
 
                     # randomly generate a bbox
                     while True: # TODO : limited trails?
+                        trail += 1
+
                         new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
                         aspect_ratio = new_bbox[2] / new_bbox[3]
 
                         if MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO:
                             break
+
+                        if trail % TRAIL_INTERVAL == 0:
+                            self.logger.debug('class_no: {}, trail: {}'.format(
+                                class_no,
+                                trail
+                            ))
 
                     label['bbox'] = new_bbox
 
@@ -336,6 +357,8 @@ class RsnaDataset(Dataset):
 
                 # randomly generate a bbox
                 while True: # TODO : limited trails?
+                    trail += 1
+
                     new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
                     iou = jaccard_numpy(
                         np.array([to_point(bbox) for bbox in patient_bboxes]),
@@ -345,6 +368,12 @@ class RsnaDataset(Dataset):
 
                     if (iou < IOU_MIN_THRESHOLD).all() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
                         break
+
+                    if trail % TRAIL_INTERVAL == 0:
+                        self.logger.debug('class_no: {}, trail: {}'.format(
+                            class_no,
+                            trail
+                        ))
 
                 label['bbox'] = new_bbox
 

@@ -15,7 +15,7 @@ import torchvision
 import torchvision.transforms as transforms
 
 # config
-IMAGE_SIZE = 256
+IMAGE_SIZE = 512
 
 # argparser
 parser = argparse.ArgumentParser(description='RSNA dataset toolkit')
@@ -68,7 +68,8 @@ if __name__ == '__main__':
         phase='train',
         augment=augmentation,
         bbox_augment=bbox_augmentation,
-        transform=transformation
+        transform=transformation,
+        logger_name='dataset_test'
     )
 
     trainLoader = torch.utils.data.DataLoader(

@@ -5,10 +5,12 @@ import pickle
 import argparse
 import pickle
 import itertools
+import logging
 
 from densenet import *
 from datasets.rsna import *
 from utils.plot import *
+from utils.log import *
 
 from PIL import Image
 import imgaug as ia
@@ -28,6 +30,8 @@ import torchvision.transforms as transforms
 num_classes = 4
 snapshot_interval = 1000
 IMAGE_SIZE = 512
+LOG_SIZE = 512 * 1024 * 1024 # 512M
+LOGGER_NAME = 'train-val'
 
 # on linux, each worker could take 300% of cpu
 # so 2 workers are enough for a 4 core machine
@@ -40,6 +44,7 @@ if sys.platform == 'win32':
 # variables
 start_epoch = 0
 best_loss = float('inf')
+global_batch = 0
 
 # helper functions
 def xavier(param):
@@ -51,8 +56,6 @@ def init_weight(m):
         m.bias.data.zero_()
 
 def snapshot(epoch, batch, model, loss):
-    print('Taking snapshot, loss: {}'.format(loss))
-
     state = {
         'net': model.state_dict(),
         'loss': loss,
@@ -98,7 +101,11 @@ parser.add_argument('--root', default='./rsna-pneumonia-detection-challenge/', h
 parser.add_argument('--parallel', action='store_true', help='run with multiple GPUs')
 parser.add_argument('--device', default='cuda:0', help='device (cuda / cpu)')
 parser.add_argument('--plot', action='store_true', help='plot loss and accuracy')
+parser.add_argument('--log', default='./net.log', help='log file path')
+parser.add_argument('--log_level', default=logging.DEBUG, type=int, help='log level')
 flags = parser.parse_args()
+
+logger = setup_logger(LOGGER_NAME, flags.log, LOG_SIZE, flags.log_level)
 
 device = torch.device(flags.device)
 
@@ -123,6 +130,19 @@ augmentation = iaa.Sequential([
     ])  
 ])
 
+# bbox augmentation
+bbox_augmentation = iaa.Sequential([
+    iaa.OneOf([
+        # geometry transform - keep lowest IOU around 0.8
+        iaa.Affine(
+            scale={"x": (0.9, 1.1), "y": (0.9, 1.1)},
+        ),
+        iaa.Affine(
+            translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+        )
+    ])
+])
+
 # image transforms
 transformation = transforms.Resize(
     size=IMAGE_SIZE,
@@ -133,7 +153,9 @@ trainSet = RsnaDataset(
     root=flags.root,
     phase='train',
     augment=augmentation,
-    transform=transformation
+    bbox_augment=bbox_augmentation,
+    transform=transformation,
+    logger_name=LOGGER_NAME
 )
 
 trainLoader = torch.utils.data.DataLoader(
@@ -148,7 +170,8 @@ valSet = RsnaDataset(
     root=flags.root,
     phase='val',
     augment=None,
-    transform=transformation
+    transform=transformation,
+    logger_name=LOGGER_NAME
 )
 
 valLoader = torch.utils.data.DataLoader(
@@ -192,109 +215,120 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 
 def train(epoch):
     print('\nTraining Epoch: {}'.format(epoch))
+    logger.info('Start training, epoch: {}'.format(epoch))
 
     model.train()
     train_loss = 0
     batch_count = len(trainLoader)
 
-    for batch_index, (images, gts, ws, hs, ids) in enumerate(trainLoader):
-        images = images.to(device)
-
-        gts = encode_gt(gts)
-        gts = torch.tensor(gts, device=device, dtype=torch.long)
-
-        optimizer.zero_grad()
-
-        if torch.cuda.device_count() > 1 and flags.parallel:
-            outputs = nn.parallel.data_parallel(model, images)
-        else:
-            outputs = model(images)
-        
-        if torch.cuda.device_count() > 1 and flags.parallel:
-            loss = nn.parallel.data_parallel(criterion, (outputs, gts))
-        else:
-            loss = criterion(outputs, gts)
-
-        loss = loss.mean()
-        loss.backward()
-        optimizer.step()
-
-        train_loss += loss.item()
-        print('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
-            epoch,
-            flags.end_epoch - 1,
-            batch_index,
-            batch_count - 1,
-            loss.item(),
-            train_loss / (batch_index + 1)
-        ))
-
-        if (batch_index + 1) % snapshot_interval == 0:
-            snapshot(epoch, batch_index, model, train_loss / (batch_index + 1))
-
-def val(epoch):
-    print('\nVal')
-
-    with torch.no_grad():
-        model.eval()
-        val_loss = 0
-        batch_count = len(valLoader)
-
-        # perfrom forward
-        for batch_index, (images, gts, ws, hs, ids) in enumerate(valLoader):
+    with tqdm(total=batch_count) as pbar:
+        for batch_index, (images, gts, ws, hs, ids) in enumerate(trainLoader):
             images = images.to(device)
 
             gts = encode_gt(gts)
             gts = torch.tensor(gts, device=device, dtype=torch.long)
 
+            optimizer.zero_grad()
+
             if torch.cuda.device_count() > 1 and flags.parallel:
                 outputs = nn.parallel.data_parallel(model, images)
             else:
                 outputs = model(images)
-
+            
             if torch.cuda.device_count() > 1 and flags.parallel:
                 loss = nn.parallel.data_parallel(criterion, (outputs, gts))
             else:
                 loss = criterion(outputs, gts)
 
             loss = loss.mean()
+            loss.backward()
+            optimizer.step()
 
-            val_loss += loss.item()
-
-            print('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
+            train_loss += loss.item()
+            logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
                 epoch,
                 flags.end_epoch - 1,
                 batch_index,
                 batch_count - 1,
                 loss.item(),
-                val_loss / (batch_index + 1)
+                train_loss / (batch_index + 1)
             ))
 
-        global best_loss
-        val_loss /= batch_count
+            global global_batch
+            global_batch += 1
+            if global_batch % snapshot_interval == 0:
+                logger.info('Taking snapshot, loss: {}'.format(train_loss / (batch_index + 1)))
+                snapshot(epoch, batch_index, model, train_loss / (batch_index + 1))
 
-        # update lr
-        scheduler.step(val_loss)
+            pbar.update(1)
 
-        # save checkpoint
-        if val_loss < best_loss:
-            print('Saving checkpoint, best loss: {}'.format(val_loss))
+def val(epoch):
+    print('\nVal')
+    logger.info('Start Val, epoch: {}'.format(epoch))
 
-            state = {
-                'net': model.state_dict(),
-                'loss': val_loss,
-                'epoch': epoch,
-            }
-            
-            if not os.path.isdir('checkpoint'):
-                os.mkdir('checkpoint')
+    with torch.no_grad():
+        model.eval()
+        val_loss = 0
+        batch_count = len(valLoader)
 
-            torch.save(state, './checkpoint/epoch_{:0>5}_loss_{:.5f}.pth'.format(
-                epoch,
-                val_loss
-            ))
+        with tqdm(total=batch_count) as pbar:
+            # perfrom forward
+            for batch_index, (images, gts, ws, hs, ids) in enumerate(valLoader):
+                images = images.to(device)
 
-            best_loss = val_loss
+                gts = encode_gt(gts)
+                gts = torch.tensor(gts, device=device, dtype=torch.long)
+
+                if torch.cuda.device_count() > 1 and flags.parallel:
+                    outputs = nn.parallel.data_parallel(model, images)
+                else:
+                    outputs = model(images)
+
+                if torch.cuda.device_count() > 1 and flags.parallel:
+                    loss = nn.parallel.data_parallel(criterion, (outputs, gts))
+                else:
+                    loss = criterion(outputs, gts)
+
+                loss = loss.mean()
+
+                val_loss += loss.item()
+
+                logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
+                    epoch,
+                    flags.end_epoch - 1,
+                    batch_index,
+                    batch_count - 1,
+                    loss.item(),
+                    val_loss / (batch_index + 1)
+                ))
+
+            global best_loss
+            val_loss /= batch_count
+
+            # update lr
+            scheduler.step(val_loss)
+
+            # save checkpoint
+            if val_loss < best_loss:
+                logger.info('Saving checkpoint, best loss: {}'.format(val_loss))
+
+                state = {
+                    'net': model.state_dict(),
+                    'loss': val_loss,
+                    'epoch': epoch,
+                }
+                
+                if not os.path.isdir('checkpoint'):
+                    os.mkdir('checkpoint')
+
+                torch.save(state, './checkpoint/epoch_{:0>5}_loss_{:.5f}.pth'.format(
+                    epoch,
+                    val_loss
+                ))
+
+                best_loss = val_loss
+
+            pbar.update(1)
 
 # ok, main loop
 if __name__ == '__main__':
