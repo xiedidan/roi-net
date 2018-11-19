@@ -302,6 +302,8 @@ def val(epoch):
                     val_loss / (batch_index + 1)
                 ))
 
+                pbar.update(1)
+
             global best_loss
             val_loss /= batch_count
 
@@ -327,8 +329,6 @@ def val(epoch):
                 ))
 
                 best_loss = val_loss
-
-            pbar.update(1)
 
 # ok, main loop
 if __name__ == '__main__':

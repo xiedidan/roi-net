@@ -35,7 +35,7 @@ IOU_MAX_THRESHOLD = 0.75
 MIN_ASPECT_RATIO = 0.25
 MAX_ASPECT_RATIO = 3
 IA_SEED = 1
-TRAIL_INTERVAL = 100
+TRAIL_LIMIT = 10000
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
 if sys.platform == 'linux':
@@ -282,7 +282,7 @@ class RsnaDataset(Dataset):
                     patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
 
                     # randomly generate a bbox
-                    while True: # TODO : limited trails?
+                    while True:
                         trail += 1
 
                         new_bbox = transform_percent_corner(to_percent(label['bbox'], w, h))
@@ -295,11 +295,14 @@ class RsnaDataset(Dataset):
                         if (iou > IOU_MAX_THRESHOLD).any() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
                             break
 
-                        if trail % TRAIL_INTERVAL == 0:
-                            self.logger.debug('class_no: {}, trail: {}'.format(
+                        if trail % TRAIL_LIMIT == 0:
+                            self.logger.warning('class_no: {}, trail: {}, label: {}'.format(
                                 class_no,
-                                trail
+                                trail,
+                                label
                             ))
+
+                            break
 
                     label['bbox'] = new_bbox
 
@@ -319,7 +322,7 @@ class RsnaDataset(Dataset):
                     ))
 
                     # randomly generate a bbox
-                    while True: # TODO : limited trails?
+                    while True:
                         trail += 1
 
                         new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
@@ -328,11 +331,14 @@ class RsnaDataset(Dataset):
                         if MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO:
                             break
 
-                        if trail % TRAIL_INTERVAL == 0:
-                            self.logger.debug('class_no: {}, trail: {}'.format(
+                        if trail % TRAIL_LIMIT == 0:
+                            self.logger.warning('class_no: {}, trail: {}, label: {}'.format(
                                 class_no,
-                                trail
+                                trail,
+                                label
                             ))
+
+                            break
 
                     label['bbox'] = new_bbox
 
@@ -356,7 +362,7 @@ class RsnaDataset(Dataset):
                 patient_bboxes = [to_percent(label['bbox'], w, h) for label in patient_label]
 
                 # randomly generate a bbox
-                while True: # TODO : limited trails?
+                while True:
                     trail += 1
 
                     new_bbox = generate_percent_corner(0.007, 0.4, 0.007, 0.8)
@@ -369,11 +375,14 @@ class RsnaDataset(Dataset):
                     if (iou < IOU_MIN_THRESHOLD).all() and (MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO):
                         break
 
-                    if trail % TRAIL_INTERVAL == 0:
-                        self.logger.debug('class_no: {}, trail: {}'.format(
+                    if trail % TRAIL_LIMIT == 0:
+                        self.logger.warning('class_no: {}, trail: {}, label: {}'.format(
                             class_no,
-                            trail
+                            trail,
+                            label
                         ))
+
+                        break
 
                 label['bbox'] = new_bbox
 
