@@ -47,7 +47,6 @@ if sys.platform == 'win32':
 start_epoch = 0
 best_loss = float('inf')
 global_batch = 0
-score = ScoreCounter()
 
 # helper functions
 def xavier(param):
@@ -94,7 +93,7 @@ parser.add_argument('--score_weight', default=5., type=float, help='weight for s
 flags = parser.parse_args()
 
 logger = setup_logger(LOGGER_NAME, flags.log, LOG_SIZE, flags.log_level)
-
+score = ScoreCounter()
 device = torch.device(flags.device)
 
 # augmentation (light but constant)
@@ -182,7 +181,7 @@ if flags.resume:
     model.load_state_dict(checkpoint['net'])
 
     # load scores
-    score.add_scores(torch.from_numpy(checkpoint['scores']))
+    score.add_scores(checkpoint['scores'])
     logger.info('Scores loaded, avg: {}'.format(score.get_avg_score()))
 elif flags.transfer:
     checkpoint = torch.load(flags.checkpoint)
@@ -219,7 +218,7 @@ def train(epoch):
             scores = scores.to(device=device)
             gts = (classes, scores)
 
-            score.add_scores(scores.cpu())
+            score.add_scores(scores.cpu().numpy())
 
             optimizer.zero_grad()
 
@@ -275,7 +274,7 @@ def train(epoch):
                     batch_index,
                     model,
                     train_loss / (batch_index + 1),
-                    score.scores.cpu().numpy()
+                    score.scores
                 )
 
             pbar.update(1)
@@ -335,8 +334,8 @@ def val(epoch):
                 state = {
                     'net': model.state_dict(),
                     'loss': val_loss,
-                    'scores': score.scores.cpu().numpy(),
-                    'epoch': epoch,
+                    'scores': score.scores,
+                    'epoch': epoch + 1, # plus 1 to start a new epoch
                 }
                 
                 if not os.path.isdir('checkpoint'):

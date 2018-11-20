@@ -12,6 +12,9 @@ sns.set()
 from densenet import *
 from datasets.rsna import *
 from utils.plot import *
+from utils.log import *
+from loss import compute_losses
+from score import ScoreCounter
 
 from PIL import Image
 import imgaug as ia
@@ -30,6 +33,8 @@ import torchvision.transforms as transforms
 # constants & configs
 num_classes = 4
 IMAGE_SIZE = 512
+LOG_SIZE = 512 * 1024 * 1024 # 512M
+LOGGER_NAME = 'eval'
 
 # on linux, each worker could take 300% of cpu
 # so 2 workers are enough for a 4 core machine
@@ -50,23 +55,6 @@ def init_weight(m):
         xavier(m.weight.data)
         m.bias.data.zero_()
 
-def encode_gt(gts):
-    result = []
-
-    for gt in gts:
-        if gt[0] == 0 and gt[1] == 0:
-            result.append(0) # negative in 'Normal'
-        elif gt[0] == 1 and gt[1] == 0:
-            result.append(1) # negative in 'No Lung Opacity / Not Normal'
-        elif gt[0] == 2 and gt[1] == 0:
-            result.append(2) # negative in 'Lung Opacity'
-        elif gt[0] == 2 and gt[1] == 1:
-            result.append(3) # positive
-        else:
-            result.append(-1) # this is not what we want
-
-    return result
-
 def calc_transfer_matrix(a, b, num_states):
     transfer_matrix = np.zeros((num_states, num_states))
     count = a.shape[0]
@@ -85,8 +73,12 @@ parser.add_argument('--checkpoint', default='./checkpoint/checkpoint.pth', help=
 parser.add_argument('--root', default='./rsna-pneumonia-detection-challenge/', help='dataset root path')
 parser.add_argument('--parallel', action='store_true', help='run with multiple GPUs')
 parser.add_argument('--device', default='cuda:0', help='device (cuda / cpu)')
+parser.add_argument('--log', default='./net.log', help='log file path')
+parser.add_argument('--log_level', default=logging.DEBUG, type=int, help='log level')
 flags = parser.parse_args()
 
+logger = setup_logger(LOGGER_NAME, flags.log, LOG_SIZE, flags.log_level)
+score = ScoreCounter()
 device = torch.device(flags.device)
 
 # image transforms
@@ -99,7 +91,8 @@ valSet = RsnaDataset(
     root=flags.root,
     phase='eval',
     augment=None,
-    transform=transformation
+    transform=transformation,
+    logger_name=LOGGER_NAME
 )
 
 valLoader = torch.utils.data.DataLoader(
@@ -118,7 +111,9 @@ model.to(device)
 checkpoint = torch.load(flags.checkpoint)
 model.load_state_dict(checkpoint['net'])
 
-criterion = nn.CrossEntropyLoss(reduce=False)
+# load scores
+score.add_scores(torch.from_numpy(checkpoint['scores']))
+logger.info('Scores loaded, avg: {}'.format(score.get_avg_score()))
 
 def eval():
     print('\nEval')
@@ -127,54 +122,59 @@ def eval():
         model.eval()
 
         val_loss = []
-        val_accu = []
+        val_class_accu = []
+        val_score_accu = []
         val_gts = []
         val_results = []
 
         # perfrom forward
-        for images, gts, ws, hs, ids in tqdm(valLoader):
+        for images, classes, scores, ws, hs, ids in tqdm(valLoader):
             images = images.to(device)
 
-            gts = encode_gt(gts)
-            gts = torch.tensor(gts, device=device, dtype=torch.long)
+            classes = classes.to(device=device)
+            scores = scores.to(device=device)
+            gts = (classes, scores)
 
             # forward
-            if torch.cuda.device_count() > 1 and flags.parallel:
-                outputs = nn.parallel.data_parallel(model, images)
-            else:
-                outputs = model(images)
+            (class_outputs, score_outputs) = model(images)
 
-            # get accu
-            results = F.softmax(outputs, dim=-1) # shape = [N, 4]
+            # get class accu
+            results = F.softmax(class_outputs, dim=-1) # shape = [N, 4]
             results = torch.argmax(results, dim=-1) # shape = [N]
 
             results = results.to(dtype=torch.long)
-            scores = torch.eq(results, gts).to(dtype=torch.float32)
+            class_measures = torch.eq(results, classes).to(dtype=torch.float32)
 
-            val_accu.append(scores.detach())
+            val_class_accu.append(class_measures.detach())
+
+            # get score accu
+            score_measures = 1 - torch.abs(score_outputs.squeeze() - scores)
+            val_score_accu.append(score_measures.detach())
 
             # loss
-            if torch.cuda.device_count() > 1 and flags.parallel:
-                loss = nn.parallel.data_parallel(criterion, (outputs, gts))
-            else:
-                loss = criterion(outputs, gts)
+            class_loss, score_loss = compute_losses((class_outputs, score_outputs), gts)
+            loss = class_loss + score_loss
 
-            val_loss.append(loss.detach()) 
+            val_loss.append(loss.detach())
 
             val_gts.append(gts)
             val_results.append(results)
         
-        val_accu = torch.cat(val_accu)
-        val_loss = torch.cat(val_loss)
+        val_class_accu = torch.cat(val_class_accu)
+        val_score_accu = torch.cat(val_score_accu)
+        val_loss = torch.tensor(val_loss)
 
-        avg_accu = val_accu.mean().item()
+        avg_class_accu = val_class_accu.mean().item()
+        avg_score_accu = val_score_accu.mean().item()
         avg_loss = val_loss.mean().item()
 
-        print('avg_loss:{}, avg_accuracy: {}'.format(
+        print('avg_loss:{}, avg_cls_accu: {}, avg_score_accu: {}'.format(
             avg_loss,
-            avg_accu
+            avg_class_accu,
+            avg_score_accu
         ))
 
+        '''
         val_gts = torch.cat(val_gts)
         val_results = torch.cat(val_results)
 
@@ -187,6 +187,7 @@ def eval():
         f, ax = plt.subplots(figsize=(num_classes, num_classes))
         sns.heatmap(matrix, annot=True, linewidths=.5, ax=ax)
         plt.show()
+        '''
 
 # ok, main loop
 if __name__ == '__main__':

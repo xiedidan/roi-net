@@ -475,4 +475,3 @@ class RsnaDataset(Dataset):
             gt = [global_class, roi_score]
 
             return layers, gt, w, h, label['patientId']
-
