@@ -6,11 +6,12 @@ Detection networks are usually trained WITHOUT pure background cases, they alway
 One of the results is more false-positive detections on certain backgound. This could be a serious problem for detection tasks with hard features (like lung opacity detection). Background features may be more obvious than positive features in these cases.  
 Training detection networks with pure backgound cases may require lots of efforts. So we design roi-net to simply suppress false-positive detections.  
 ## How
-roi-net is basically DenseNet with special handled inputs / outputs. Each predicted bbox is a sample.  
-The inputs are 3-layer images. One layer for the whole image, one for ROI mask, and the other for resized ROI crop. We may crop ROIs in the network like RPNs, but cropping during sample loading is much easier and faster.  
-For training / validation samples, we directly pick bboxes from targets and apply them to negative images, to generate negative bboxes. Also, we randomly pick negative bboxes from positive images.  
+roi-net is basically DenseNet with 2 heads - global classification and ROI score. Each input bbox is a sample.  
+The inputs are 3-layer images. One layer for the global image, one for 120% ROI crop, and the other for original ROI crop, both crops are resized to the same size as global image. We may crop ROIs in the network like RPNs, but cropping during sample loading is much easier.  
+For training / validation samples, we randomly generate bboxes and keep IOU high/low for positive/negative samples.  
 ![](doc/roi-dataset-sample.png)  
-For outputs, we label the class of the whole image as well as the bbox. Since bbox is part of the whole image (there won't be positive bbox on a negative image), we encode the result into joint-states. eg. negative bbox on negative image = 0, and only keep the states that are allowed...  
+For outputs, we label global class, as well as ROI IOU score.  
+A mixed loss is used for training.Classification loss and weighted score loss together are added together.  
 ## Training / Validation
 ```
 usage: train-val.py [-h] [--lr LR] [--end_epoch END_EPOCH]
@@ -53,8 +54,6 @@ optional arguments:
   --parallel            run with multiple GPUs
   --device DEVICE       device (cuda / cpu)
 ```
-We trained roi-net with some chest x-ray dataset to predict 1 of 4 cases, and 85% accuracy is archived after 21 epochs.  
-![](doc/roi-transfer.png)  
 ## Tips
 ### Custom dataset
 You could implement your custom dataset. Transformation and augmentation should be implemented in YourCustomDataset.``__get_item__()``  
