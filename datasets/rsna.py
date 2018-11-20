@@ -167,7 +167,8 @@ def jaccard_numpy(box_a, box_b):
 
 def rsna_collate(batch):
     images = []
-    gts = []
+    classes = []
+    scores = []
     ws = []
     hs = []
     ids = []
@@ -176,14 +177,17 @@ def rsna_collate(batch):
         image, gt, w, h, patientId = sample
 
         images.append(image)
-        gts.append(gt)
+        classes.append(gt[0])
+        scores.append(gt[1])
         ws.append(w)
         hs.append(h)
         ids.append(patientId)
 
     images = torch.stack(images, dim=0) # now, [n, c, h, w]
+    classes = torch.tensor(classes, dtype=torch.long)
+    scores = torch.tensor(scores, dtype=torch.float32)
 
-    return images, gts, ws, hs, ids
+    return images, classes, scores, ws, hs, ids
 
 class RsnaDataset(Dataset):
     def __init__(self, root, class_mapping=CLASS_MAPPING, num_classes = 3, phase='train', augment=None, bbox_augment=None, transform=None, logger_name='rsna'):
@@ -306,7 +310,7 @@ class RsnaDataset(Dataset):
 
                     label['bbox'] = new_bbox
 
-                    roi_class = 1
+                    roi_score = np.amax(iou)
                 else:
                     # randomly select a negative image                    
                     class_patients = self.non_targets[class_no]
@@ -342,7 +346,7 @@ class RsnaDataset(Dataset):
 
                     label['bbox'] = new_bbox
 
-                    roi_class = 0
+                    roi_score = 0
             else:
                 # load image
                 image, w, h = load_dicom_image(os.path.join(
@@ -386,7 +390,7 @@ class RsnaDataset(Dataset):
 
                 label['bbox'] = new_bbox
 
-                roi_class = 0
+                roi_score = 0
 
             # image transforms
             if self.transforms is not None:
@@ -432,9 +436,21 @@ class RsnaDataset(Dataset):
 
                     label['bbox'] = to_percent(new_a_cn, new_w, new_h) # p_cn
 
+            '''
             # create mask - 255(uint8) and 1.0(float32) are both ok
             mask = np.zeros((new_h, new_w, 1), dtype=np.uint8)
             mask[new_a_pt[1]:new_a_pt[3], new_a_pt[0]:new_a_pt[2], :] = 255
+            '''
+
+            # use 'mask' layer as 110% crop
+            mask = transforms.functional.resized_crop(
+                new_image,
+                new_a_cn[1] - new_a_cn[1] * 0.05,
+                new_a_cn[0] - new_a_cn[0] * 0.05,
+                new_a_cn[3] * 1.1,
+                new_a_cn[2] * 1.1,
+                (new_h, new_w)
+            )
 
             # crop & resize
             crop = transforms.functional.resized_crop(
@@ -455,6 +471,7 @@ class RsnaDataset(Dataset):
 
             # gt
             global_class = class_no if class_no < self.num_classes else self.num_classes - 1
-            gt = [global_class, roi_class]
+            gt = [global_class, roi_score]
 
             return layers, gt, w, h, label['patientId']
+

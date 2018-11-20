@@ -37,9 +37,15 @@ class DenseNet121(nn.Module):
         # save number of feature from pre-trained classifier
         num_ftrs = self.densenet121.classifier.in_features
 
-        # create our classifier heads
+        # create our classifier head
         self.densenet121.classifier = nn.Sequential(
             nn.Linear(num_ftrs, out_size),
+            nn.Sigmoid()
+        )
+
+        # roi score head
+        self.densenet121.scorer = nn.Sequential(
+            nn.Linear(num_ftrs, 1),
             nn.Sigmoid()
         )
 
@@ -48,12 +54,12 @@ class DenseNet121(nn.Module):
         out = F.relu(features, inplace=True)
         
         feature_size = out.shape[-1] # get w
-
         out = F.avg_pool2d(out, kernel_size=feature_size, stride=1).view(features.size(0), -1)
 
-        out = self.densenet121.classifier(out)
+        classes = self.densenet121.classifier(out)
+        scores = self.densenet121.scorer(out).squeeze()
 
-        return out
+        return (classes, scores)
 
     def transfer(self, state_dict):
         # load pretrained chexnet parameters (from old pytorch version)

@@ -11,6 +11,8 @@ from densenet import *
 from datasets.rsna import *
 from utils.plot import *
 from utils.log import *
+from loss import compute_losses
+from score import ScoreCounter
 
 from PIL import Image
 import imgaug as ia
@@ -28,7 +30,7 @@ import torchvision.transforms as transforms
 
 # constants & configs
 num_classes = 4
-snapshot_interval = 1000
+snapshot_interval = 5
 IMAGE_SIZE = 512
 LOG_SIZE = 512 * 1024 * 1024 # 512M
 LOGGER_NAME = 'train-val'
@@ -45,6 +47,7 @@ if sys.platform == 'win32':
 start_epoch = 0
 best_loss = float('inf')
 global_batch = 0
+score = ScoreCounter()
 
 # helper functions
 def xavier(param):
@@ -55,39 +58,23 @@ def init_weight(m):
         xavier(m.weight.data)
         m.bias.data.zero_()
 
-def snapshot(epoch, batch, model, loss):
+def snapshot(epoch, batch, model, loss, scores):
     state = {
         'net': model.state_dict(),
         'loss': loss,
+        'scores': scores,
         'epoch': epoch
     }
     
     if not os.path.isdir('snapshot'):
         os.mkdir('snapshot')
 
-    torch.save(state, './snapshot/e_{:0>6}_b_{:0>6}_loss_{:.5f}.pth'.format(
+    torch.save(state, './snapshot/e_{:0>6}_b_{:0>6}_loss_{:.5f}_score_{:.5f}.pth'.format(
         epoch,
         batch,
-        loss
+        loss,
+        scores.mean().item()
     ))
-
-def encode_gt(gts):
-    result = []
-
-    for gt in gts:
-        if gt[0] == 0 and gt[1] == 0:
-            result.append(0) # negative in 'Normal'
-        elif gt[0] == 1 and gt[1] == 0:
-            result.append(1) # negative in 'No Lung Opacity / Not Normal'
-        elif gt[0] == 2 and gt[1] == 0:
-            result.append(2) # negative in 'Lung Opacity'
-        elif gt[0] == 2 and gt[1] == 1:
-            result.append(3) # positive
-        else:
-            result.append(-1) # this is not what we want
-
-    return result
-
 
 # argparser
 parser = argparse.ArgumentParser(description='Pneumonia Verifier Training')
@@ -192,11 +179,13 @@ if flags.resume:
     best_loss = checkpoint['loss']
     start_epoch = checkpoint['epoch']
     model.load_state_dict(checkpoint['net'])
+
+    # load scores
+    score.add_scores(torch.from_numpy(checkpoint['scores']))
+    logger.info('Scores loaded, avg: {}'.format(score.get_avg_score()))
 elif flags.transfer:
     checkpoint = torch.load(flags.checkpoint)
     model.transfer(checkpoint['state_dict'])
-
-criterion = nn.CrossEntropyLoss(reduce=False)
 
 optimizer = optim.SGD(
     model.parameters(),
@@ -222,14 +211,18 @@ def train(epoch):
     batch_count = len(trainLoader)
 
     with tqdm(total=batch_count) as pbar:
-        for batch_index, (images, gts, ws, hs, ids) in enumerate(trainLoader):
+        for batch_index, (images, classes, scores, ws, hs, ids) in enumerate(trainLoader):
             images = images.to(device)
 
-            gts = encode_gt(gts)
-            gts = torch.tensor(gts, device=device, dtype=torch.long)
+            classes = classes.to(device=device)
+            scores = scores.to(device=device)
+            gts = (classes, scores)
+
+            score.add_scores(scores.cpu())
 
             optimizer.zero_grad()
 
+            '''
             if torch.cuda.device_count() > 1 and flags.parallel:
                 outputs = nn.parallel.data_parallel(model, images)
             else:
@@ -239,26 +232,49 @@ def train(epoch):
                 loss = nn.parallel.data_parallel(criterion, (outputs, gts))
             else:
                 loss = criterion(outputs, gts)
-
+            
             loss = loss.mean()
             loss.backward()
+            '''
+
+            outputs = model(images)
+            class_loss, score_loss = compute_losses(outputs, gts)
+
+            loss = class_loss + score_loss
+            loss.backward()
+
             optimizer.step()
 
-            train_loss += loss.item()
-            logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
+            class_loss = class_loss.mean().item()
+            score_loss = score_loss.mean().item()
+
+            train_loss += class_loss + score_loss
+            logger.info('e:{}/{}, b:{}/{}, a_s: {:.2f}, b_l:{:.2f} = c_l:{:.2f} + s_l:{:.2f}, e_l:{:.2f}'.format(
                 epoch,
                 flags.end_epoch - 1,
                 batch_index,
                 batch_count - 1,
-                loss.item(),
+                score.get_avg_score(),
+                train_loss,
+                class_loss,
+                score_loss,
                 train_loss / (batch_index + 1)
             ))
 
             global global_batch
             global_batch += 1
             if global_batch % snapshot_interval == 0:
-                logger.info('Taking snapshot, loss: {}'.format(train_loss / (batch_index + 1)))
-                snapshot(epoch, batch_index, model, train_loss / (batch_index + 1))
+                logger.info('Taking snapshot, loss: {}, avg_score: {}'.format(
+                    train_loss / (batch_index + 1),
+                    score.get_avg_score()
+                ))
+                snapshot(
+                    epoch,
+                    batch_index,
+                    model,
+                    train_loss / (batch_index + 1),
+                    score.scores.cpu().numpy()
+                )
 
             pbar.update(1)
 
@@ -273,32 +289,28 @@ def val(epoch):
 
         with tqdm(total=batch_count) as pbar:
             # perfrom forward
-            for batch_index, (images, gts, ws, hs, ids) in enumerate(valLoader):
+            for batch_index, (images, classes, scores, ws, hs, ids) in enumerate(valLoader):
                 images = images.to(device)
 
-                gts = encode_gt(gts)
-                gts = torch.tensor(gts, device=device, dtype=torch.long)
+                classes = classes.to(device=device)
+                scores = scores.to(device=device)
+                gts = (classes, scores)
 
-                if torch.cuda.device_count() > 1 and flags.parallel:
-                    outputs = nn.parallel.data_parallel(model, images)
-                else:
-                    outputs = model(images)
+                outputs = model(images)
+                class_loss, score_loss = compute_losses(outputs, gts)
 
-                if torch.cuda.device_count() > 1 and flags.parallel:
-                    loss = nn.parallel.data_parallel(criterion, (outputs, gts))
-                else:
-                    loss = criterion(outputs, gts)
+                class_loss = class_loss.mean().item()
+                score_loss = score_loss.mean().item()
 
-                loss = loss.mean()
-
-                val_loss += loss.item()
-
-                logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f}, e_l:{:.2f}'.format(
+                val_loss += class_loss + score_loss
+                logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f} = c_l:{:.2f} + s_l:{:.2f}, e_l:{:.2f}'.format(
                     epoch,
                     flags.end_epoch - 1,
                     batch_index,
                     batch_count - 1,
-                    loss.item(),
+                    val_loss,
+                    class_loss,
+                    score_loss,
                     val_loss / (batch_index + 1)
                 ))
 
@@ -312,20 +324,25 @@ def val(epoch):
 
             # save checkpoint
             if val_loss < best_loss:
-                logger.info('Saving checkpoint, best loss: {}'.format(val_loss))
+                logger.info('Saving checkpoint, best loss: {}, avg_score: {}'.format(
+                    val_loss,
+                    score.get_avg_score()
+                ))
 
                 state = {
                     'net': model.state_dict(),
                     'loss': val_loss,
+                    'scores': score.scores.cpu().numpy(),
                     'epoch': epoch,
                 }
                 
                 if not os.path.isdir('checkpoint'):
                     os.mkdir('checkpoint')
 
-                torch.save(state, './checkpoint/epoch_{:0>5}_loss_{:.5f}.pth'.format(
+                torch.save(state, './checkpoint/epoch_{:0>5}_loss_{:.5f}_score_{:.5f}.pth'.format(
                     epoch,
-                    val_loss
+                    val_loss,
+                    score.get_avg_score()
                 ))
 
                 best_loss = val_loss
