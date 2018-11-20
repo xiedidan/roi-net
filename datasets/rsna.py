@@ -36,6 +36,7 @@ MIN_ASPECT_RATIO = 0.25
 MAX_ASPECT_RATIO = 3
 IA_SEED = 1
 TRAIL_LIMIT = 10000
+CROP_BG_RATIO = 0.2
 
 # fix for 'RuntimeError: received 0 items of ancdata' problem
 if sys.platform == 'linux':
@@ -390,7 +391,7 @@ class RsnaDataset(Dataset):
 
                 label['bbox'] = new_bbox
 
-                roi_score = 0
+                roi_score = np.amax(iou)
 
             # image transforms
             if self.transforms is not None:
@@ -442,13 +443,13 @@ class RsnaDataset(Dataset):
             mask[new_a_pt[1]:new_a_pt[3], new_a_pt[0]:new_a_pt[2], :] = 255
             '''
 
-            # use 'mask' layer as 110% crop
+            # use 'mask' layer as 120% crop
             mask = transforms.functional.resized_crop(
                 new_image,
-                new_a_cn[1] - new_a_cn[1] * 0.05,
-                new_a_cn[0] - new_a_cn[0] * 0.05,
-                new_a_cn[3] * 1.1,
-                new_a_cn[2] * 1.1,
+                new_a_cn[1] * (1 - CROP_BG_RATIO / 2),
+                new_a_cn[0] * (1 - CROP_BG_RATIO / 2),
+                new_a_cn[3] * (1 + CROP_BG_RATIO),
+                new_a_cn[2] * (1 + CROP_BG_RATIO),
                 (new_h, new_w)
             )
 

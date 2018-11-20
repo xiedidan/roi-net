@@ -30,7 +30,7 @@ import torchvision.transforms as transforms
 
 # constants & configs
 num_classes = 4
-snapshot_interval = 5
+snapshot_interval = 1000
 IMAGE_SIZE = 512
 LOG_SIZE = 512 * 1024 * 1024 # 512M
 LOGGER_NAME = 'train-val'
@@ -90,6 +90,7 @@ parser.add_argument('--device', default='cuda:0', help='device (cuda / cpu)')
 parser.add_argument('--plot', action='store_true', help='plot loss and accuracy')
 parser.add_argument('--log', default='./net.log', help='log file path')
 parser.add_argument('--log_level', default=logging.DEBUG, type=int, help='log level')
+parser.add_argument('--score_weight', default=5., type=float, help='weight for score loss')
 flags = parser.parse_args()
 
 logger = setup_logger(LOGGER_NAME, flags.log, LOG_SIZE, flags.log_level)
@@ -240,7 +241,7 @@ def train(epoch):
             outputs = model(images)
             class_loss, score_loss = compute_losses(outputs, gts)
 
-            loss = class_loss + score_loss
+            loss = class_loss + flags.score_weight * score_loss
             loss.backward()
 
             optimizer.step()
@@ -248,15 +249,16 @@ def train(epoch):
             class_loss = class_loss.mean().item()
             score_loss = score_loss.mean().item()
 
-            train_loss += class_loss + score_loss
-            logger.info('e:{}/{}, b:{}/{}, a_s: {:.2f}, b_l:{:.2f} = c_l:{:.2f} + s_l:{:.2f}, e_l:{:.2f}'.format(
+            train_loss += class_loss + flags.score_weight * score_loss
+            logger.info('e:{}/{}, b:{}/{}, a_s: {:.2f}, b_l:{:.2f} = c_l:{:.2f} + {:.2f} * s_l:{:.2f}, e_l:{:.2f}'.format(
                 epoch,
                 flags.end_epoch - 1,
                 batch_index,
                 batch_count - 1,
                 score.get_avg_score(),
-                train_loss,
+                class_loss + flags.score_weight * score_loss,
                 class_loss,
+                flags.score_weight,
                 score_loss,
                 train_loss / (batch_index + 1)
             ))
@@ -302,14 +304,15 @@ def val(epoch):
                 class_loss = class_loss.mean().item()
                 score_loss = score_loss.mean().item()
 
-                val_loss += class_loss + score_loss
-                logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f} = c_l:{:.2f} + s_l:{:.2f}, e_l:{:.2f}'.format(
+                val_loss += class_loss + flags.score_weight * score_loss
+                logger.info('e:{}/{}, b:{}/{}, b_l:{:.2f} = c_l:{:.2f} + {:.2f} * s_l:{:.2f}, e_l:{:.2f}'.format(
                     epoch,
                     flags.end_epoch - 1,
                     batch_index,
                     batch_count - 1,
-                    val_loss,
+                    class_loss + flags.score_weight * score_loss,
                     class_loss,
+                    flags.score_weight,
                     score_loss,
                     val_loss / (batch_index + 1)
                 ))

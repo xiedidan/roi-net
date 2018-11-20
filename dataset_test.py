@@ -80,12 +80,12 @@ if __name__ == '__main__':
         collate_fn=rsna_collate
     )
 
-    for images, gts, ws, hs, ids in tqdm(trainLoader):
-        for gt, patientId in zip(gts, ids):
-            print('patientId: {}, global: {}, roi: {}'.format(
+    for images, classes, scores, ws, hs, ids in tqdm(trainLoader):
+        for class_no, score, patientId in zip(classes, scores, ids):
+            print('patientId: {}, class: {}, score: {}'.format(
                 patientId,
-                list(trainSet.class_mapping.keys())[gt[0]],
-                'hit' if gt[1] == 1 else 'miss'
+                list(trainSet.class_mapping.keys())[class_no],
+                score
             ))
 
         plot_batch(images)
