@@ -152,7 +152,7 @@ def eval():
             gt_score_results = torch.gt(scores, 0.7)
             output_score_results = torch.gt(score_outputs.squeeze(), avg_score)
             score_measures = torch.eq(output_score_results, gt_score_results).to(dtype=torch.float32)
-            # print('\n{}\n{}\n{}\n'.format(gt_score_results, output_score_results, score_measures))
+            logger.debug('\n{}\n{}\n{}\n'.format(gt_score_results, output_score_results, score_measures))
 
             val_score_accu.append(score_measures.detach())
 
