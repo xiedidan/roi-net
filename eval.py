@@ -113,7 +113,8 @@ model.load_state_dict(checkpoint['net'])
 
 # load scores
 score.add_scores(torch.from_numpy(checkpoint['scores']))
-logger.info('Scores loaded, avg: {}'.format(score.get_avg_score()))
+avg_score = float(score.get_avg_score())
+logger.info('Scores loaded, avg: {}'.format(avg_score))
 
 def eval():
     print('\nEval')
@@ -148,7 +149,11 @@ def eval():
             val_class_accu.append(class_measures.detach())
 
             # get score accu
-            score_measures = 1 - torch.abs(score_outputs.squeeze() - scores)
+            gt_score_results = torch.gt(scores, 0.7)
+            output_score_results = torch.gt(score_outputs.squeeze(), avg_score)
+            score_measures = torch.eq(output_score_results, gt_score_results).to(dtype=torch.float32)
+            print('\n{}\n{}\n{}\n'.format(gt_score_results, output_score_results, score_measures))
+
             val_score_accu.append(score_measures.detach())
 
             # loss
@@ -168,7 +173,7 @@ def eval():
         avg_score_accu = val_score_accu.mean().item()
         avg_loss = val_loss.mean().item()
 
-        print('avg_loss:{}, avg_cls_accu: {}, avg_score_accu: {}'.format(
+        print('avg_loss:{}\navg_cls_accu: {}\navg_score_accu: {}'.format(
             avg_loss,
             avg_class_accu,
             avg_score_accu

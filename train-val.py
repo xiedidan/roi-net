@@ -351,7 +351,8 @@ def val(epoch):
 
 # ok, main loop
 if __name__ == '__main__':
+    scheduler.step(best_loss)
+    
     for epoch in range(start_epoch, flags.end_epoch):
-        scheduler.step(best_loss)
         train(epoch)
         val(epoch)
